@@ -7,10 +7,10 @@ import time
 
 chip = gpiod.chip("gpiochip0")
 # sensor's filter, which color channel (RGB) is measured
-s2 = chip.get_line(23)
-s3 = chip.get_line(24)
+s2 = chip.get_line(5)
+s3 = chip.get_line(6)
 # pin  that reads sensor's output frequency
-signal = chip.get_line(25)
+signal = chip.get_line(13)
 # num of signal cycles to measure for calculating
 # each color's frequency
 CYCLES = 10
