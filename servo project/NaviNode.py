@@ -3,6 +3,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 import gpiod
 import re
+import threading
+import time
 
 # Constants for thresholds and target marker ID
 TARGET_MARKER_ID = '123'  # Set your target marker ID here
@@ -19,6 +21,11 @@ RIGHT_BACK = (17, 22)   # GPIO pins for right back motor (IN1, IN2)
 class NavigationNode(Node):
     def __init__(self):
         super().__init__('navigation_node')
+
+
+        # Initialize PWM
+        self.pwm_threads = {}  # Store threads for PWM
+        self.pwm_running = {}  # Track running state for PWM
         
         # Initialize GPIO chip and lines
         self.chip = gpiod.Chip('gpiochip4')
@@ -97,13 +104,17 @@ class NavigationNode(Node):
         
         # Step 2: Translation adjustment
         elif abs(self.translation_error_x) > DISTANCE_THRESHOLD:
+
+            if (abs(self.translation_error_x)>0.4):
+                duty_cycle=20
+
             # Use translation errors to adjust forward or backward movement
             if self.translation_error_x > 0:
-                self.move_forward_or_backward(forward=True)
+                self.move_forward_or_backward(forward=True,duty_cycle=duty_cycle, frequency=50 )
             else:
-                self.move_forward_or_backward(forward=False)
+                self.move_forward_or_backward(forward=False, duty_cycle=duty_cycle, frequency=50 )
         
-        # Step 3: Fine adjustments in position and orientation if close to marker
+        
         else:
             # Stop the motors when properly aligned and within the threshold
             self.stop_motors()
@@ -112,54 +123,86 @@ class NavigationNode(Node):
         # Rotate in place until the marker comes into view
         self.get_logger().info('Rotating in place to find marker')
         for pin_pair in self.left_motor_pins:
-            self.set_motor(pin_pair, forward=True)  # Left wheels forward
+            self.set_motor(pin_pair, forward=True, duty_cycle=50, frequency=50)  # Left wheels forward
         for pin_pair in self.right_motor_pins:
-            self.set_motor(pin_pair, forward=False)  # Right wheels backward
+            self.set_motor(pin_pair, forward=False, duty_cycle=50, frequency=50)  # Right wheels backward
 
     def adjust_rotation(self, clockwise):
         # Rotate to adjust orientation
         if clockwise:
             self.get_logger().info('Adjusting rotation: rotating clockwise')
             for pin_pair in self.left_motor_pins:
-                self.set_motor(pin_pair, forward=True)  # Left wheels forward
+                self.set_motor(pin_pair, forward=True, duty_cycle=25, frequency=50)  # Left wheels forward
             for pin_pair in self.right_motor_pins:
-                self.set_motor(pin_pair, forward=False)  # Right wheels backward
+                self.set_motor(pin_pair, forward=False, duty_cycle=25, frequency=50)  # Right wheels backward
         else:
             self.get_logger().info('Adjusting rotation: rotating counterclockwise')
             for pin_pair in self.left_motor_pins:
-                self.set_motor(pin_pair, forward=False)  # Left wheels backward
+                self.set_motor(pin_pair, forward=False, duty_cycle=25, frequency=50)  # Left wheels backward
             for pin_pair in self.right_motor_pins:
-                self.set_motor(pin_pair, forward=True)  # Right wheels forward
+                self.set_motor(pin_pair, forward=True, duty_cycle=25, frequency=50)  # Right wheels forward
 
-    def move_forward_or_backward(self, forward):
+    def move_forward_or_backward(self, forward, duty_cycle, frequency):
         # Move robot forward or backward based on direction
         if forward:
             self.get_logger().info('Moving forward')
         else:
             self.get_logger().info('Moving backward')
         for pin_pair in self.left_motor_pins + self.right_motor_pins:
-            self.set_motor(pin_pair, forward)
-
-    def stop_motors(self):
+            self.set_motor(pin_pair, forward, duty_cycle, frequency)
         # Stop all motors
         self.get_logger().info('Stopping motors')
         for pin_pair in self.left_motor_pins + self.right_motor_pins:
             self.set_motor(pin_pair, None)
 
-    def set_motor(self, pin_pair, forward):
+    def set_motor(self, pin_pair, forward, duty_cycle, frequency):
         line1, line2 = self.gpios[pin_pair]
         if forward is None:
             # Stop motor
             line1.set_value(0)
             line2.set_value(0)
-        elif forward:
-            # Move forward
-            line1.set_value(1)
-            line2.set_value(0)
         else:
-            # Move backward
-            line1.set_value(0)
-            line2.set_value(1)
+            # Start PWM
+            self._start_pwm(pin_pair, line1, line2, forward, duty_cycle, frequency)
+
+    def _start_pwm(self, pin_pair, line1, line2, forward, duty_cycle, frequency):
+        """Start a PWM thread for the motor."""
+        # Stop any existing PWM thread for this motor
+        self._stop_pwm(pin_pair)
+
+        # Set up the PWM thread
+        self.pwm_running[pin_pair] = True
+
+        def pwm_thread():
+            period = 1 / frequency
+            on_time = period * (duty_cycle / 100)
+            off_time = period - on_time
+            while self.pwm_running[pin_pair]:
+                if forward:
+                    line1.set_value(1)
+                    line2.set_value(0)
+                else:
+                    line1.set_value(0)
+                    line2.set_value(1)
+                time.sleep(on_time)
+                line1.set_value(0)
+                line2.set_value(0)
+                time.sleep(off_time)
+
+        # Start the thread
+        thread = threading.Thread(target=pwm_thread, daemon=True)
+        self.pwm_threads[pin_pair] = thread
+        thread.start()
+
+    def _stop_pwm(self, pin_pair):
+        """Stop the PWM thread for the motor."""
+        if pin_pair in self.pwm_running:
+            self.pwm_running[pin_pair] = False
+        if pin_pair in self.pwm_threads:
+            self.pwm_threads[pin_pair].join()
+            del self.pwm_threads[pin_pair]
+            del self.pwm_running[pin_pair]
+
 
 def main(args=None):
     rclpy.init(args=args)
